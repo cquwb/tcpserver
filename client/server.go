@@ -34,7 +34,7 @@ func (this *ReceveSession) Close() {
 }
 
 func (this *ReceveSession) RegisterServer(id uint32) {
-	this.Write(1, []byte("register"))
+	this.Write(1, []byte("你好"))
 }
 
 func (this *ReceveSession) Run() {
@@ -53,6 +53,8 @@ func (this *ReceveSession) Write(head uint32, data []byte) {
 
 func (this *ReceveSession) Process(data []byte) {
 	msg := tcp.Unmarshal(data)
-	g_commandM.Dispatch(this, msg.Head, msg.Data)
+	g_commandM.Dispatch(this, msg.Head.Id, msg.Data.([]byte))
 	//g_commandM.Dispatch(data)
 }
+
+

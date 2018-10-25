@@ -5,32 +5,26 @@ import (
 	"net"
 	//"time"
 	"io"
+	//"sync"
 )
 
 /**
 1.简单的一个gorutine来处理一个链接 变成两个 一个read 一个write
-
-
-
 */
 
 type Message struct {
-	Head uint32
-	Length uint32
-	Data []byte
+	Head *PackHead
+	Data interface{}
 }
 
-
-type ClientSessions struct {
-	Msg chan []byte
-	sessions map[string]*ClientSession
-}
 
 type ClientSession struct {
+	//wg sync.WaitGroup
 	conn net.Conn
 	ReadData chan []byte
 	WriteMsg chan *Message
 	s Sessioner
+	CloseChan chan struct{}
 }
 
 func NewClientSession(c net.Conn, s Sessioner) *ClientSession {
@@ -39,17 +33,8 @@ func NewClientSession(c net.Conn, s Sessioner) *ClientSession {
 		ReadData:make(chan []byte,1024),
 		WriteMsg:make(chan *Message,1024),
 		s:s,
-		
+		CloseChan:make(chan struct{}),	
 	}
-}
-
-func (this *ClientSessions) AddNewSession(s *ClientSession) {
-	addr := s.conn.RemoteAddr().String()
-	this.sessions[addr] = s
-}
-
-func (this *ClientSessions) Begin() bool {
-	return true
 }
 
 func BeginServer(conf *Config, srv Server) {
@@ -65,12 +50,7 @@ func BeginServer(conf *Config, srv Server) {
 	fmt.Printf("begin server \n")
 	for {
 		conn, err := l.Accept()
-		/*
-		if err != nil {
-			fmt.Printf("[TCPServer] accept error: %v \n", err)
-			continue
-		}
-		*/
+		
 		if err != nil {
 			if ne, ok := err.(net.Error); ok && ne.Temporary() {
 				continue//不懂为什么这么做?背下来就好了
@@ -84,92 +64,147 @@ func BeginServer(conf *Config, srv Server) {
 }
 
 
-func BeginClient(sess Sessioner, addr string) {
-	con, err := net.Dial("tcp", "127.0.0.1:8080")
+func BeginClient(sess Sessioner, conf *Config) {
+	con, err := net.Dial("tcp", conf.Address)
 	if err != nil {
 		fmt.Printf("net dial error %v \n", err)
 		return
 	}
-	NewClientSession(con,sess).handleConnection()
+	NewClientSession(con, sess).handleConnection()
 }
 
 func (this *ClientSession) readLoop() {
 	for {
-		
-		data := make([]byte, 4, 4)
+		data := make([]byte, MSG_SIZE, MSG_SIZE)
 		n, err := io.ReadFull(this.conn, data)
 		if err != nil {
 			fmt.Printf("read data error %v \n", err)
-			return
+			this.Stop()
+			goto EXIT
 		}
 		
-		fmt.Printf("read data 1 %v \n", data)
-		if n != 4 {
+		fmt.Printf("read data 1 %v %d \n", data, n)
+		if n != MSG_SIZE {
 			fmt.Printf("read ms begin error %d \n", n)
 			continue
 		}
-		len1 := ByteToUint32(data)
-		if len1 < 8 || len1 > 65536 {
+		len1 := DecodeUint32(data)
+		if len1 < PACK_HEAD_LEN-MSG_SIZE || len1 > 65536 {
 			fmt.Printf("read ms len error %d \n", len1)
 			continue
 		}
-		lenNeed := int(len1)
-		fmt.Printf("get data len is %d \n", lenNeed)
-		data2 := make([]byte, 0, lenNeed+4)
-		data2 = append(data2, data...)
-		for lenNeed > 0 {
-			//这里为什么要用一个for循环来做呢？
-			rLen := 4
-			if lenNeed < 4 {
-				rLen = lenNeed
-			}
-			data3 := make([]byte, rLen, rLen)
-			n2, err2 := this.conn.Read(data3)
-			if  err2 != nil {
-				fmt.Printf("read data error %v \n", err2)
-				return
-			}
-			fmt.Printf("read data 2 %v \n", data3)
-			if n2 < rLen {
-				fmt.Printf("read msg body error %d %d \n",len1, n2)
-				break
-			}
-			lenNeed = lenNeed - n2
-			data2 = append(data2, data3[:n2]...)
+		lenNeed := int(len1)-MSG_SIZE
+		fmt.Printf("read need len %d \n", lenNeed)
+		
+		data12 := make([]byte, lenNeed, lenNeed)
+		_, err2 := io.ReadFull(this.conn, data12)
+		if err2 != nil {
+			fmt.Printf("read data error %v \n", err2)
+			this.Stop()
+			goto EXIT
 		}
-		if len(data2) > 0 {
-			this.handleData(data2)
+		if len(data12) > 0 {
+			this.handleData(data12)
 		}
 		
 	}
+EXIT:
+	//todo anything
 }
 
 
 func (this *ClientSession) writeLoop() {
+	writeData := make([]byte, MSG_MAX_SIZE)
+	HeadData := make([]byte, PACK_HEAD_LEN)
+	DataBuff := make([]byte, MSG_MAX_SIZE-PACK_HEAD_LEN)
+	index := 0
+	
 	for {
 		select {
 			case msg := <- this.WriteMsg:
-				fmt.Printf("WRITE DATA IS %v \n", msg)
-				this.conn.Write(Marshal(msg))
+				fmt.Printf("Write Data Head is %v \n", msg.Head)
+				fmt.Printf("Write Data Data is %v \n", msg.Data)
+				n , data, err := Marshal(msg, HeadData, DataBuff)
+				if err != nil {
+					break
+				}
+				copy(writeData[0:], HeadData)
+				copy(writeData[PACK_HEAD_LEN:], data)
+				index += n
+				for more:=true;more; {
+					select {
+						case msg:=<-this.WriteMsg:
+							n , data, err := Marshal(msg, HeadData, DataBuff)
+							if err != nil {
+								more = false
+								break
+							}
+							if index + n > MSG_MAX_SIZE {
+								if _, err := this.conn.Write(writeData[0:index]); err != nil {
+									this.Stop()
+									goto EXIT
+								}
+								index = 0
+								copy(writeData[0:], HeadData)
+								copy(writeData[PACK_HEAD_LEN:], data)
+								more = false
+							} else {
+								copy(writeData[index:], HeadData)
+								copy(writeData[index+PACK_HEAD_LEN:], HeadData)
+								index += n
+							}
+						case <- this.CloseChan:
+							goto EXIT
+						default:
+							more = false	
+					}
+				}
+	
+				if _, err := this.conn.Write(writeData[0:index]); err != nil {
+					this.Stop()
+					goto EXIT
+				}
+			case <-this.CloseChan:
+				goto EXIT
 		}
 	}
+EXIT:
 }
 
-func Marshal(msg *Message) []byte {
-	data := make([]byte, 0, msg.Length)
-	data = append(data, Uint32ToByte(msg.Length)...)
-	data = append(data, Uint32ToByte(msg.Head)...)
-	data = append(data, msg.Data...)
-	return data
+func Marshal(msg *Message, HeadBuff []byte, DataBuff []byte) (int, []byte, error) {
+	
+	
+	
+	switch  v:=msg.Data.(type) {
+		case  []byte: 
+			DataBuff =v
+		default:
+			fmt.Printf("write data type error \n")
+			return 0, nil, WirteTypeError
+	}
+	
+	if len(DataBuff)+PACK_HEAD_LEN > MSG_MAX_SIZE {
+		fmt.Printf("write data type over flow \n")
+		return 0, nil, WriteOverflow
+	}
+	
+	EncodePackHead(HeadBuff, msg.Head)
+	
+	return int(msg.Head.Length), DataBuff, nil
 }
 
 func Unmarshal(data []byte) *Message {
-	msg := &Message{}
-	msg.Length = ByteToUint32(data[0:4])
-	msg.Head = ByteToUint32(data[4:8])
-	msg.Data = data[8:]
+	
+	head := GetInputHead(data)
+	msg := &Message{
+		head,
+		data[20:],
+	}
+	
 	return msg
 }
+
+
 
 /**
 这种写法待优化
@@ -178,36 +213,32 @@ func Unmarshal(data []byte) *Message {
 */
 func (this *ClientSession) Write(head uint32, data []byte) {
 	msg := &Message{
-		Head:head,
-		Length:uint32(4)+uint32(len(data)),
+		Head:&PackHead{uint32(PACK_HEAD_LEN+len(data)),head, 0, 0},
 		Data:data,
 	}
 	this.WriteMsg <- msg
 }
 
 func (this *ClientSession) handleConnection() {
+	//this.wg.Add()
 	go this.readLoop()
+	//this.wg.Add()
 	go this.writeLoop()
 	this.s.Init(this)
 }
 
-func ByteToUint32(da []byte) uint32 {
-	return uint32(da[0]) << 24  + uint32(da[1]) << 16 + uint32(da[2]) << 8 + uint32(da[3])
-}
 
-func Uint32ToByte(n uint32) []byte {
-	data := make([]byte, 4, 4)
-	data[0] = uint8(n >> 24)
-	data[1] = uint8(n >> 16)
-	data[2] = uint8(n >> 8)
-	data[3] = uint8(n)
-	return data
-}
 
 
 func (this *ClientSession) handleData(data []byte) {
-	fmt.Printf("GET DATA IS %s \n", data)
+	fmt.Printf("Read Data byte is %v \n", data)
+	fmt.Printf("Read Data string is %s \n", data)
 	//fmt.Printf("get Data length is %d \n", n)
 	//todo handle data
 	this.ReadData <- data
+}
+
+//todo 
+func (this *ClientSession) Stop() {
+	
 }

@@ -61,7 +61,7 @@ handle conn {
 	3.this.s.init()
 }
 
-ReadFromConn 从conn度消息到channel
+ReadFromConn 从conn读消息到channel
 WriteToSession 消息写到SESSION的channel
 WriteToConn 从本地的channnel写消息到connn
 
@@ -82,3 +82,45 @@ broker
 
 2.marshal
 a.
+
+
+
+3. head {
+	Length uint32
+	Cmd uint32
+	Sid uint64
+	Uid uint64
+}
+
+4. message {
+	Head *PackHead
+	Info interface //一个protobuf 的 struct 
+}
+
+5.
+message => []byte
+marshal(message, head, data) []byte, err {
+	EncodePackHead(head, message.head)
+	return message.Data, nil
+}
+
+
+6.
+unmarshal
+[]byte => message
+
+
+7.
+message PackHead {
+	Length uint32
+	Cmd uint32
+	Uid uint64
+	Sid uint64
+}
+//将ph 转换为[]byte
+EncodePackHead(buf []byte, ph *PackHead) {
+}
+
+//
+DecodePackHead(buf []bute, ph *PackHead) {
+}

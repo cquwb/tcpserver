@@ -3,6 +3,7 @@ package main
 import (
 	//"fmt"
 	"tcp"
+	//_ "net/http/pprof"
 )
 
 type ServerConfig struct {
@@ -32,7 +33,8 @@ func main() {
 	config := &tcp.Config{
 		Address:":8080",
 	}
-	go tcp.BeginServer(config,g_server)
+
+	go tcp.BeginServer(config, g_server)
 	g_server.Run()
 }
 

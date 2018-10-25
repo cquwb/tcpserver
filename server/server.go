@@ -34,7 +34,7 @@ func (this *MainServer) Close() {
 	
 }
 
-func (this *MainServer) AddSession(ss ReceveSession) {
+func (this *MainServer) AddSession(ss *ReceveSession) {
 	
 }
 
@@ -82,7 +82,7 @@ func (this *ReceveSession) Run() {
 
 func (this *ReceveSession) Process(data []byte) {
 	msg := tcp.Unmarshal(data)
-	g_server.PutMsg(&ServerMsg{this, msg.Head, msg.Data})
+	g_server.PutMsg(&ServerMsg{this, msg.Head.Id, msg.Data.([]byte)})
 	//g_commandM.Dispatch(data)
 }
 
